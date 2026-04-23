@@ -1,5 +1,5 @@
 # Use pre-built PyTorch base image to avoid installing heavy ML libs from scratch
-FROM pytorch/pytorch:2.1.0-runtime-ubuntu22.04
+FROM pytorch/pytorch:latest
 
 # Prevent Python from writing .pyc files
 ENV PYTHONDONTWRITEBYTECODE=1
