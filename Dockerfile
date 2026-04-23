@@ -1,32 +1,38 @@
-# Use pre-built PyTorch base image to avoid installing heavy ML libs from scratch
-FROM pytorch/pytorch:latest
+# Build stage
+FROM pytorch/pytorch:latest as builder
 
-# Prevent Python from writing .pyc files
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
-# Set working directory
 WORKDIR /app
 
-# Install system dependencies (important for OpenCV & EasyOCR)
 RUN apt-get update && apt-get install -y \
     libgl1 \
     libglib2.0-0 \
-    gcc \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements first (for caching)
 COPY requirements.txt .
+RUN pip install --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
-# Install Python dependencies
-RUN pip install --upgrade pip
-RUN pip install -r requirements.txt
+# Runtime stage
+FROM pytorch/pytorch:latest
 
-# Copy project files
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y \
+    libgl1 \
+    libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy installed packages from builder
+COPY --from=builder /opt/conda /opt/conda
+
 COPY . .
 
-# Expose port
 EXPOSE 8000
 
-# Run your Flask app
 CMD ["gunicorn", "app:app", "--bind", "0.0.0.0:8000", "--workers", "1", "--timeout", "120"]
