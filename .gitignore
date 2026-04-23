@@ -1,8 +1,0 @@
-﻿.env
-.env.local
-__pycache__/
-*.py[cod]
-*.egg-info/
-dist/
-build/
-.DS_Store
