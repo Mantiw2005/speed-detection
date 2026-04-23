@@ -6,5 +6,3 @@ ultralytics
 easyocr
 paho-mqtt
 python-dotenv
-torch
-torchvision
