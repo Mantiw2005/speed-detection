@@ -1,8 +1,7 @@
 flask
-numpy
-opencv-python-headless
 pillow
 ultralytics
 easyocr
 paho-mqtt
 python-dotenv
+gunicorn
