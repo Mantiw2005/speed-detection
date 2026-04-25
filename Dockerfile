@@ -1,4 +1,4 @@
-FROM bitnami/pytorch:latest
+FROM pytorch/pytorch:2.0-cuda11.8-runtime-ubuntu22.04
 
 WORKDIR /app
 
