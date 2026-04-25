@@ -2,11 +2,12 @@ FROM ubuntu:22.04
 
 WORKDIR /app
 
-# Install Python and minimal dependencies
+# Install Python and OpenCV dependencies
 RUN apt-get update && apt-get install -y \
     python3.10 \
     python3-pip \
-    libxcb1 \
+    libgl1 \
+    libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
