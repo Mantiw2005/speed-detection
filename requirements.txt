@@ -1,2 +1,10 @@
 flask
 gunicorn
+numpy
+pillow
+ultralytics
+easyocr
+paho-mqtt
+opencv-python-headless
+torch
+torchvision
