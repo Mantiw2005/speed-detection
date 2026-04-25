@@ -2,6 +2,23 @@ FROM bitnami/pytorch:latest
 
 WORKDIR /app
 
+# Install system dependencies for OpenCV
+RUN apt-get update && apt-get install -y \
+    libxcb1 \
+    libxkbcommon0 \
+    libxkbcommon-x11-0 \
+    libxcb-icccm4 \
+    libxcb-image0 \
+    libxcb-keysyms1 \
+    libxcb-randr0 \
+    libxcb-render-util0 \
+    libxcb-shape0 \
+    libxcb-xfixes0 \
+    libxcb-xinerama0 \
+    libxcb-xkb1 \
+    libxkb1 \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
