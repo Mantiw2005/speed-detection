@@ -1,9 +1,11 @@
-FROM pytorch/pytorch:2.0-cuda11.8-runtime-ubuntu22.04
+FROM ubuntu:22.04
 
 WORKDIR /app
 
-# Install system dependencies for OpenCV
+# Install Python and system dependencies
 RUN apt-get update && apt-get install -y \
+    python3.12 \
+    python3-pip \
     libxcb1 \
     libxkbcommon0 \
     libxkbcommon-x11-0 \
