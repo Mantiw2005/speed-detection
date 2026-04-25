@@ -1,7 +1,10 @@
 flask
+gunicorn
+numpy
 pillow
 ultralytics
 easyocr
 paho-mqtt
-python-dotenv
-gunicorn
+opencv-python-headless
+torch
+torchvision
