@@ -7,7 +7,6 @@ import base64
 import logging
 import threading
 import csv
-
 import numpy as np
 from PIL import Image
 from flask import Flask, request, jsonify
@@ -18,19 +17,19 @@ import paho.mqtt.client as mqtt
 # ================= LOGGING =================
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
-
 app = Flask(__name__)
 violation_log = []
 LOG_FILE = "violations_log.csv"
 
 # ================= MQTT =================
-MQTT_BROKER = os.getenv("MQTT_BROKER")
-MQTT_PORT   = int(os.getenv("MQTT_PORT", 8883))
-MQTT_USER   = os.getenv("MQTT_USER")
-MQTT_PASS   = os.getenv("MQTT_PASS")
+MQTT_BROKER = os.getenv("MQTT_BROKER", "localhost")
+MQTT_PORT = int(os.getenv("MQTT_PORT", 8883))
+MQTT_USER = os.getenv("MQTT_USER", "")
+MQTT_PASS = os.getenv("MQTT_PASS", "")
 
 mqttc = mqtt.Client(client_id="cloud_ai_server")
-mqttc.username_pw_set(MQTT_USER, MQTT_PASS)
+if MQTT_USER and MQTT_PASS:
+    mqttc.username_pw_set(MQTT_USER, MQTT_PASS)
 mqttc.tls_set()
 
 def on_connect(client, userdata, flags, rc):
@@ -44,9 +43,12 @@ mqttc.on_connect = on_connect
 def mqtt_thread():
     while True:
         try:
-            log.info("[MQTT] Connecting...")
-            mqttc.connect(MQTT_BROKER, MQTT_PORT, 60)
-            mqttc.loop_start()
+            if MQTT_BROKER and MQTT_BROKER != "localhost":
+                log.info("[MQTT] Connecting...")
+                mqttc.connect(MQTT_BROKER, MQTT_PORT, 60)
+                mqttc.loop_start()
+            else:
+                log.info("[MQTT] Broker not configured, skipping")
             break
         except Exception as e:
             log.warning(f"[MQTT] Retry: {e}")
@@ -65,11 +67,9 @@ def load_models():
         log.info("[MODEL] Loading YOLO...")
         model = YOLO("yolov8n.pt")
         log.info("[MODEL] YOLO ready")
-
         log.info("[MODEL] Loading EasyOCR...")
         reader = easyocr.Reader(["en"], gpu=False)
         log.info("[MODEL] OCR ready")
-
         models_ready = True
         log.info("[MODEL] All ready")
     except Exception as e:
@@ -98,9 +98,12 @@ def publish(record):
     if not mqttc.is_connected():
         log.warning("[MQTT] Not connected")
         return
-    mqttc.publish("highway/violations/record", json.dumps(record))
-    msg = f"SPD {record['speed_kmh']} LIM {record['limit_kmh']} PLT {record['plate']}"
-    mqttc.publish("highway/display/warning", msg)
+    try:
+        mqttc.publish("highway/violations/record", json.dumps(record))
+        msg = f"SPD {record['speed_kmh']} LIM {record['limit_kmh']} PLT {record['plate']}"
+        mqttc.publish("highway/display/warning", msg)
+    except Exception as e:
+        log.error(f"[MQTT] Publish error: {e}")
 
 # ================= ROUTES =================
 @app.route("/")
@@ -118,29 +121,27 @@ def health():
 @app.route("/analyze", methods=["POST"])
 def analyze():
     start = time.time()
-
     if not models_ready:
         return jsonify({"status":"loading"}), 503
-
+    
     data = request.get_json(force=True)
-
     speed = float(data.get("speed",0))
     limit = float(data.get("limit",50))
     img_b64 = data.get("image","")
-
+    
     if not img_b64:
         return jsonify({"error":"no image"}), 400
-
+    
     img_bytes = base64.b64decode(img_b64)
     img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
     img_np = np.array(img)
-
+    
     is_vehicle, v_conf = detect_vehicle(img_np)
     if not is_vehicle:
         return jsonify({"status":"false_positive"})
-
+    
     plate, p_conf = read_plate(img_np)
-
+    
     record = {
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
         "speed_kmh": speed,
@@ -149,20 +150,20 @@ def analyze():
         "plate_confidence": p_conf,
         "vehicle_confidence": v_conf
     }
-
+    
     violation_log.append(record)
-
+    
     try:
         write_header = not os.path.exists(LOG_FILE)
         with open(LOG_FILE,"a",newline="") as f:
             w = csv.DictWriter(f, fieldnames=record.keys())
             if write_header: w.writeheader()
             w.writerow(record)
-    except:
-        pass
-
+    except Exception as e:
+        log.error(f"[LOG] Write error: {e}")
+    
     publish(record)
-
+    
     return jsonify({
         "status":"ok",
         "plate": plate,
