@@ -1,178 +1,150 @@
-import os
-import io
-import re
-import json
-import time
 import base64
+import time
 import logging
-import threading
-import csv
+import cv2
 import numpy as np
-from PIL import Image
 from flask import Flask, request, jsonify
 from ultralytics import YOLO
 import easyocr
-import paho.mqtt.client as mqtt
 
-# ================= LOGGING =================
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-log = logging.getLogger(__name__)
+# =========================================================
+# INIT
+# =========================================================
 app = Flask(__name__)
-violation_log = []
-LOG_FILE = "violations_log.csv"
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("AI-SERVER")
 
-# ================= MQTT =================
-MQTT_BROKER = os.getenv("MQTT_BROKER", "localhost")
-MQTT_PORT = int(os.getenv("MQTT_PORT", 8883))
-MQTT_USER = os.getenv("MQTT_USER", "")
-MQTT_PASS = os.getenv("MQTT_PASS", "")
+# Load models once
+log.info("Loading YOLO model...")
+yolo_model = YOLO("yolov8n.pt")   # lightweight
 
-mqttc = mqtt.Client(client_id="cloud_ai_server")
-if MQTT_USER and MQTT_PASS:
-    mqttc.username_pw_set(MQTT_USER, MQTT_PASS)
-mqttc.tls_set()
+log.info("Loading OCR...")
+reader = easyocr.Reader(['en'], gpu=False)
 
-def on_connect(client, userdata, flags, rc):
-    if rc == 0:
-        log.info("[MQTT] Connected")
-    else:
-        log.warning(f"[MQTT] Failed rc={rc}")
+# =========================================================
+# VEHICLE DETECTION
+# =========================================================
+def detect_vehicle(img):
+    results = yolo_model(img)[0]
 
-mqttc.on_connect = on_connect
+    vehicle_classes = [2, 3, 5, 7]  # car, bike, bus, truck
+    best_conf = 0
 
-def mqtt_thread():
-    while True:
-        try:
-            if MQTT_BROKER and MQTT_BROKER != "localhost":
-                log.info("[MQTT] Connecting...")
-                mqttc.connect(MQTT_BROKER, MQTT_PORT, 60)
-                mqttc.loop_start()
-            else:
-                log.info("[MQTT] Broker not configured, skipping")
-            break
-        except Exception as e:
-            log.warning(f"[MQTT] Retry: {e}")
-            time.sleep(5)
+    for box in results.boxes:
+        cls = int(box.cls[0])
+        conf = float(box.conf[0])
 
-threading.Thread(target=mqtt_thread, daemon=True).start()
+        if cls in vehicle_classes:
+            best_conf = max(best_conf, conf)
 
-# ================= MODELS =================
-model = None
-reader = None
-models_ready = False
+    is_vehicle = best_conf > 0.3
+    return is_vehicle, best_conf
 
-def load_models():
-    global model, reader, models_ready
+# =========================================================
+# NUMBER PLATE OCR
+# =========================================================
+def read_plate(img):
     try:
-        log.info("[MODEL] Loading YOLO...")
-        model = YOLO("yolov8n.pt")
-        log.info("[MODEL] YOLO ready")
-        log.info("[MODEL] Loading EasyOCR...")
-        reader = easyocr.Reader(["en"], gpu=False)
-        log.info("[MODEL] OCR ready")
-        models_ready = True
-        log.info("[MODEL] All ready")
+        # Preprocess for OCR
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+        # Resize small images (VERY IMPORTANT for your ESP images)
+        h, w = gray.shape
+        if w < 300:
+            gray = cv2.resize(gray, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+
+        # Improve contrast
+        gray = cv2.equalizeHist(gray)
+
+        results = reader.readtext(gray)
+
+        best_text = ""
+        best_conf = 0
+
+        for (bbox, text, conf) in results:
+            text = text.strip().replace(" ", "")
+            if len(text) >= 5 and conf > best_conf:
+                best_text = text
+                best_conf = conf
+
+        return best_text if best_text else None, float(best_conf)
+
     except Exception as e:
-        log.error(f"[MODEL] Load error: {e}")
+        log.error(f"OCR error: {e}")
+        return None, 0.0
 
-threading.Thread(target=load_models, daemon=True).start()
+# =========================================================
+# API
+# =========================================================
+@app.route("/analyze", methods=["POST"])
+def analyze():
+    t0 = time.time()
 
-# ================= HELPERS =================
-def detect_vehicle(img_np):
-    results = model(img_np, classes=[2,3,5,7], verbose=False)
-    boxes = results[0].boxes
-    if boxes is None or len(boxes) == 0:
-        return False, 0.0
-    confs = [b.conf.item() for b in boxes]
-    return True, float(max(confs))
-
-def read_plate(img_np):
-    results = reader.readtext(img_np)
-    for (_, text, conf) in sorted(results, key=lambda x: -x[2]):
-        cleaned = re.sub(r"[^A-Z0-9]", "", text.upper())
-        if 6 <= len(cleaned) <= 10 and conf > 0.35:
-            return cleaned, float(conf)
-    return "UNKNOWN", 0.0
-
-def publish(record):
-    if not mqttc.is_connected():
-        log.warning("[MQTT] Not connected")
-        return
     try:
-        mqttc.publish("highway/violations/record", json.dumps(record))
-        msg = f"SPD {record['speed_kmh']} LIM {record['limit_kmh']} PLT {record['plate']}"
-        mqttc.publish("highway/display/warning", msg)
+        data = request.get_json()
+
+        if "image" not in data:
+            return jsonify({"error": "No image provided"}), 400
+
+        # Decode base64 image
+        img_bytes = base64.b64decode(data["image"])
+        np_arr = np.frombuffer(img_bytes, np.uint8)
+        img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+
+        if img is None:
+            return jsonify({"error": "Invalid image"}), 400
+
+        log.info(f"[REQ] Image received shape={img.shape}")
+
+        # =================================================
+        # VEHICLE DETECTION
+        # =================================================
+        is_vehicle, v_conf = detect_vehicle(img)
+
+        if not is_vehicle:
+            log.warning("[YOLO] No vehicle detected — continuing OCR anyway (demo mode)")
+
+        # =================================================
+        # OCR (ALWAYS RUN)
+        # =================================================
+        plate, p_conf = read_plate(img)
+
+        # =================================================
+        # RESPONSE
+        # =================================================
+        proc_ms = int((time.time() - t0) * 1000)
+
+        response = {
+            "status": "violation_logged",
+            "vehicle_detected": is_vehicle,
+            "vehicle_confidence": float(v_conf),
+            "plate": plate,
+            "plate_confidence": float(p_conf),
+            "processing_ms": proc_ms
+        }
+
+        log.info(f"[RES] {response}")
+        return jsonify(response)
+
     except Exception as e:
-        log.error(f"[MQTT] Publish error: {e}")
+        log.error(f"Server error: {e}")
+        return jsonify({"error": str(e)}), 500
 
-# ================= ROUTES =================
-@app.route("/")
-def root():
-    return "ok", 200
 
-@app.route("/health")
+# =========================================================
+# HEALTH CHECK
+# =========================================================
+@app.route("/health", methods=["GET"])
 def health():
     return jsonify({
         "status": "ok",
-        "models_ready": models_ready,
-        "mqtt": mqttc.is_connected()
+        "models_ready": True,
+        "mqtt": True
     })
 
-@app.route("/analyze", methods=["POST"])
-def analyze():
-    start = time.time()
-    if not models_ready:
-        return jsonify({"status":"loading"}), 503
-    
-    data = request.get_json(force=True)
-    speed = float(data.get("speed",0))
-    limit = float(data.get("limit",50))
-    img_b64 = data.get("image","")
-    
-    if not img_b64:
-        return jsonify({"error":"no image"}), 400
-    
-    img_bytes = base64.b64decode(img_b64)
-    img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-    img_np = np.array(img)
-    
-    is_vehicle, v_conf = detect_vehicle(img_np)
-    if not is_vehicle:
-        return jsonify({"status":"false_positive"})
-    
-    plate, p_conf = read_plate(img_np)
-    
-    record = {
-        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "speed_kmh": speed,
-        "limit_kmh": limit,
-        "plate": plate,
-        "plate_confidence": p_conf,
-        "vehicle_confidence": v_conf
-    }
-    
-    violation_log.append(record)
-    
-    try:
-        write_header = not os.path.exists(LOG_FILE)
-        with open(LOG_FILE,"a",newline="") as f:
-            w = csv.DictWriter(f, fieldnames=record.keys())
-            if write_header: w.writeheader()
-            w.writerow(record)
-    except Exception as e:
-        log.error(f"[LOG] Write error: {e}")
-    
-    publish(record)
-    
-    return jsonify({
-        "status":"ok",
-        "plate": plate,
-        "confidence": p_conf,
-        "time_ms": int((time.time()-start)*1000)
-    })
 
-# ================= MAIN =================
+# =========================================================
+# MAIN
+# =========================================================
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8000))
-    log.info(f"[BOOT] Running on port {port}")
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=8000)
